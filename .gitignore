@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+__pycache__/
+ml/models/
+ml/data/
+ml/seed_models/
+*.log

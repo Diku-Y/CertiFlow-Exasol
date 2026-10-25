@@ -1,0 +1,98 @@
+# CertiFlow - full stack:  cp .env.example .env  &&  docker compose up --build
+services:
+  mongo:
+    image: mongo:7
+    container_name: certiflow-mongo
+    restart: unless-stopped
+    command: ["--replSet", "rs0", "--bind_ip_all"]   # a replica set is required for multi-document transactions
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "try { rs.status().ok } catch (e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'mongo:27017'}]}).ok }"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: certiflow-redis
+    restart: unless-stopped
+    # Persistence + eviction only of keys that have a TTL (sessions, locks, caches), never of counters
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "volatile-lru"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  ml:
+    build: ./ml
+    container_name: certiflow-ml
+    restart: unless-stopped
+    environment:
+      ML_API_KEY: ${ML_API_KEY:-}
+    volumes:
+      - ml-models:/app/models        # versioned models survive restarts and rebuilds
+    ports:
+      - "8000:8000"
+
+  exasol-analytics:
+    build: ./analytics
+    container_name: certiflow-exasol-analytics
+    restart: unless-stopped
+    environment:
+      EXASOL_DSN: ${EXASOL_DSN:-}
+      EXASOL_USER: ${EXASOL_USER:-}
+      EXASOL_PASSWORD: ${EXASOL_PASSWORD:-}
+      EXASOL_SCHEMA: ${EXASOL_SCHEMA:-CERTIFLOW}
+      EXASOL_INGEST_KEY: ${EXASOL_INGEST_KEY:-}
+    ports:
+      - "8100:8100"
+
+  backend:
+    build: ./backend
+    container_name: certiflow-backend
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ml:
+        condition: service_started
+    environment:
+      PORT: 5000
+      NODE_ENV: ${NODE_ENV:-development}
+      MONGODB_URI: ${MONGODB_URI:-mongodb://mongo:27017/certiflow?replicaSet=rs0}
+      MONGO_TRANSACTIONS: ${MONGO_TRANSACTIONS:-true}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env (copy .env.example)}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-2h}
+      REDIS_URL: redis://redis:6379
+      ML_SERVICE_URL: http://ml:8000
+      ML_API_KEY: ${ML_API_KEY:-}
+      EXASOL_ANALYTICS_URL: http://exasol-analytics:8100
+      EXASOL_INGEST_KEY: ${EXASOL_INGEST_KEY:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      DEMO_SHOW_RISK_TO_CUSTOMER: ${DEMO_SHOW_RISK_TO_CUSTOMER:-true}
+    ports:
+      - "5000:5000"
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:5000/api}
+    container_name: certiflow-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
+
+volumes:
+  mongo-data:
+  redis-data:
+  ml-models:
